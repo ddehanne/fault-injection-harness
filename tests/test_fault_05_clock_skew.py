@@ -1,39 +1,14 @@
-"""FAULT-05: Clock skew +1500ms (NTP jump) — monotone time."""
-import pytest
+"""FAULT-05: validate timestamp monotonicity in synthetic records."""
 import json
-import time
-from harness.chaos_monkey import ChaosMorkey
-from harness.invariant_checker import InvariantChecker
+import pytest
+from harness.invariant_checker import InvariantChecker, InvariantResult
+
 
 @pytest.mark.fault
-def test_fault_05_clock_skew_monotone(read_ledger):
-    """
-    Scenario:
-    1. Inject clock jump: +1500ms mid-cycle
-    2. System continues trading under skewed time
-    3. Verify: ledger timestamps remain strictly monotone (no backwards time)
-    
-    Invariant: Logical time >= wall time (causality preserved)
-    """
-    chaos = ChaosMorkey()
-    checker = InvariantChecker()
-    
-    pre_ledger = read_ledger()
-    pre_time = time.time()
-    
-    # Inject clock skew: +1500ms
-    result = chaos.clock_skew(offset_seconds=1500).execute(lambda: None)
-    
-    post_ledger = read_ledger()
-    post_time = time.time()
-    
-    # Verify: timestamps in ledger are still monotone
-    summary = checker.validate_all()
-    
-    assert result["result"]["injected"] == True
-    assert result["result"]["fault"] == "clock_skew"
-    # Critical: monotone_timestamps must pass despite skew
-    results_dict = {name: status for name, status in summary["results"]}
-    assert results_dict.get("monotone_timestamps") == "pass", "Clock skew broke causality"
-    assert summary["fault_detected"] == 0, "System should handle skew gracefully"
-    print(f"✓ FAULT-05: Clock skew +1500ms, causality preserved, {len(post_ledger)} lines monotone")
+def test_backward_and_equal_timestamps_rejected(ledger_path):
+    checker = InvariantChecker(ledger_path)
+    for timestamps in ([1, 0], [1, 1]):
+        ledger_path.write_text("".join(json.dumps({"timestamp": t}) + "\n" for t in timestamps), encoding="utf-8")
+        assert checker.check_monotone_timestamps()[1] is InvariantResult.FAIL
+    ledger_path.write_text('{"timestamp": 1}\n{"timestamp": 2}\n', encoding="utf-8")
+    assert checker.check_monotone_timestamps()[1] is InvariantResult.PASS

@@ -1,126 +1,82 @@
-"""Verify invariants post-fault."""
+"""Offline invariant checks over explicit, disposable test inputs."""
 import json
-from pathlib import Path
-from typing import List, Tuple
 from enum import Enum
+from pathlib import Path
+
 
 class InvariantResult(Enum):
     PASS = "pass"
     FAIL = "fail"
     FAULT_DETECTED = "fault_detected"
 
+
 class InvariantChecker:
-    """Validates system invariants under fault injection."""
-    
-    def __init__(self):
-        self.ledger_path = Path('/opt/trading/data/state_store/ledger.jsonl')
-        self.results: List[Tuple[str, InvariantResult]] = []
-    
-    def check_monotone_timestamps(self) -> Tuple[str, InvariantResult]:
-        """Verify all ledger timestamps are strictly monotone."""
-        if not self.ledger_path.exists():
-            return ("monotone_timestamps", InvariantResult.PASS)
-        
+    def __init__(self, ledger_path: Path):
+        self.ledger_path = Path(ledger_path)
+
+    def _entries(self):
+        # A missing or malformed ledger is not evidence of integrity.
+        with self.ledger_path.open(encoding="utf-8") as handle:
+            entries = [json.loads(line) for line in handle if line.strip()]
+        if not all(isinstance(entry, dict) for entry in entries):
+            raise ValueError("Ledger lines must be JSON objects")
+        return entries
+
+    def check_ledger_integrity(self):
         try:
-            with open(self.ledger_path) as f:
-                lines = [json.loads(line) for line in f if line.strip()]
-            
-            if len(lines) < 2:
-                return ("monotone_timestamps", InvariantResult.PASS)
-            
-            for i in range(1, len(lines)):
-                t_prev = lines[i-1].get("timestamp", 0)
-                t_curr = lines[i].get("timestamp", 0)
-                
-                if t_curr <= t_prev:
-                    return ("monotone_timestamps", InvariantResult.FAIL)
-            
-            return ("monotone_timestamps", InvariantResult.PASS)
-        except Exception as e:
-            return ("monotone_timestamps", InvariantResult.FAULT_DETECTED)
-    
-    def check_no_duplicate_orders(self) -> Tuple[str, InvariantResult]:
-        """Verify no order ID appears twice in ledger."""
-        if not self.ledger_path.exists():
-            return ("no_duplicate_orders", InvariantResult.PASS)
-        
-        try:
-            with open(self.ledger_path) as f:
-                lines = [json.loads(line) for line in f if line.strip()]
-            
-            order_ids = set()
-            for line in lines:
-                if "order_id" in line:
-                    oid = line["order_id"]
-                    if oid in order_ids:
-                        return ("no_duplicate_orders", InvariantResult.FAIL)
-                    order_ids.add(oid)
-            
-            return ("no_duplicate_orders", InvariantResult.PASS)
-        except Exception as e:
-            return ("no_duplicate_orders", InvariantResult.FAULT_DETECTED)
-    
-    def check_ledger_integrity(self) -> Tuple[str, InvariantResult]:
-        """Verify ledger can be read without parse errors."""
-        if not self.ledger_path.exists():
-            return ("ledger_integrity", InvariantResult.PASS)
-        
-        try:
-            with open(self.ledger_path) as f:
-                line_count = 0
-                for line in f:
-                    if line.strip():
-                        json.loads(line)
-                        line_count += 1
-            
-            return ("ledger_integrity", InvariantResult.PASS)
-        except json.JSONDecodeError as e:
+            self._entries()
+        except (OSError, ValueError, TypeError):
             return ("ledger_integrity", InvariantResult.FAIL)
-        except Exception as e:
-            return ("ledger_integrity", InvariantResult.FAULT_DETECTED)
-    
-    def check_position_conservation(self, positions_ledger: dict) -> Tuple[str, InvariantResult]:
-        """Verify total shares sum matches expectation."""
+        return ("ledger_integrity", InvariantResult.PASS)
+
+    def check_monotone_timestamps(self):
         try:
-            total = sum(positions_ledger.values())
-            if total < 0:  # Extreme negative position = anomaly
-                return ("position_conservation", InvariantResult.FAIL)
-            return ("position_conservation", InvariantResult.PASS)
-        except Exception as e:
-            return ("position_conservation", InvariantResult.FAULT_DETECTED)
-    
-    def check_broker_ledger_sync(self, broker_pos: dict, ledger_pos: dict) -> Tuple[str, InvariantResult]:
-        """Verify broker state matches local ledger."""
+            entries = self._entries()
+            times = [entry["timestamp"] for entry in entries]
+            if any(isinstance(t, bool) or not isinstance(t, (int, float)) for t in times):
+                raise ValueError("Non-numeric timestamp")
+            if any(b <= a for a, b in zip(times, times[1:])):
+                return ("monotone_timestamps", InvariantResult.FAIL)
+        except (OSError, ValueError, TypeError, KeyError):
+            return ("monotone_timestamps", InvariantResult.FAIL)
+        return ("monotone_timestamps", InvariantResult.PASS)
+
+    def check_no_duplicate_orders(self):
         try:
-            broker_total = sum(abs(v) for v in broker_pos.values())
-            ledger_total = sum(abs(v) for v in ledger_pos.values())
-            
-            if abs(broker_total - ledger_total) > 1:  # >1 share tolerance
-                return ("broker_ledger_sync", InvariantResult.FAIL)
-            
-            return ("broker_ledger_sync", InvariantResult.PASS)
-        except Exception as e:
-            return ("broker_ledger_sync", InvariantResult.FAULT_DETECTED)
-    
-    def validate_all(self) -> dict:
-        """Run all checks."""
+            entries = self._entries()
+            ids = [entry["order_id"] for entry in entries if "order_id" in entry]
+            if len(ids) != len(set(ids)):
+                return ("no_duplicate_orders", InvariantResult.FAIL)
+        except (OSError, ValueError, TypeError):
+            return ("no_duplicate_orders", InvariantResult.FAIL)
+        return ("no_duplicate_orders", InvariantResult.PASS)
+
+    def check_broker_ledger_sync(self, broker_pos: dict, ledger_pos: dict):
+        try:
+            if not isinstance(broker_pos, dict) or not isinstance(ledger_pos, dict):
+                raise TypeError("Positions must be mappings")
+            if any(type(x) not in (int, float) for x in (*broker_pos.values(), *ledger_pos.values())):
+                raise TypeError("Position quantities must be numeric")
+            return ("broker_ledger_sync", InvariantResult.PASS if broker_pos == ledger_pos else InvariantResult.FAIL)
+        except (TypeError, ValueError):
+            return ("broker_ledger_sync", InvariantResult.FAIL)
+
+    def check_position_conservation(self, positions_ledger: dict):
+        """Basic input check only; not proof of economic position conservation."""
+        valid = isinstance(positions_ledger, dict) and all(
+            isinstance(k, str) and k and type(v) in (int, float)
+            for k, v in positions_ledger.items()
+        )
+        return ("position_input_valid", InvariantResult.PASS if valid else InvariantResult.FAIL)
+
+    def validate_all(self):
         checks = [
+            self.check_ledger_integrity(),
             self.check_monotone_timestamps(),
             self.check_no_duplicate_orders(),
-            self.check_ledger_integrity(),
         ]
-        
-        self.results = checks
-        
-        passed = sum(1 for _, r in checks if r == InvariantResult.PASS)
-        failed = sum(1 for _, r in checks if r == InvariantResult.FAIL)
-        detected = sum(1 for _, r in checks if r == InvariantResult.FAULT_DETECTED)
-        
-        return {
-            "total": len(checks),
-            "passed": passed,
-            "failed": failed,
-            "fault_detected": detected,
-            "all_pass": failed == 0 and detected == 0,
-            "results": [(name, result.value) for name, result in checks]
-        }
+        passed = sum(v is InvariantResult.PASS for _, v in checks)
+        return {"total": len(checks), "passed": passed,
+                "failed": len(checks) - passed,
+                "fault_detected": 0, "all_pass": passed == len(checks),
+                "results": [(k, v.value) for k, v in checks]}
