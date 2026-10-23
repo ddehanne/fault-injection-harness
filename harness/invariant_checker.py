@@ -1,5 +1,6 @@
 """Offline invariant checks over explicit, disposable test inputs."""
 import json
+import math
 from enum import Enum
 from pathlib import Path
 
@@ -33,7 +34,7 @@ class InvariantChecker:
         try:
             entries = self._entries()
             times = [entry["timestamp"] for entry in entries]
-            if any(isinstance(t, bool) or not isinstance(t, (int, float)) for t in times):
+            if any(type(t) not in (int, float) or not math.isfinite(t) for t in times):
                 raise ValueError("Non-numeric timestamp")
             if any(b <= a for a, b in zip(times, times[1:])):
                 return ("monotone_timestamps", InvariantResult.FAIL)
@@ -45,6 +46,8 @@ class InvariantChecker:
         try:
             entries = self._entries()
             ids = [entry["order_id"] for entry in entries if "order_id" in entry]
+            if any(not isinstance(i, str) or not i for i in ids):
+                return ("no_duplicate_orders", InvariantResult.FAIL)
             if len(ids) != len(set(ids)):
                 return ("no_duplicate_orders", InvariantResult.FAIL)
         except (OSError, ValueError, TypeError):
